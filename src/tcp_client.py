@@ -6,9 +6,9 @@ Usage: python src/tcp_client.py <server-ip>
 import socket
 import sys
 
-PORT = 9000
+PORT = 5000
 
-host = sys.argv[1] if len(sys.argv) > 1 else "127.0.0.1"
+host = sys.argv[1] if len(sys.argv) > 1 else "169.254.142.155"
 
 try:
     with socket.create_connection((host, PORT), timeout=5) as sock:

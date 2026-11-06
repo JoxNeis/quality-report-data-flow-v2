@@ -5,7 +5,7 @@ Usage: python src/tcp_server.py
 
 import socket
 
-PORT = 9000
+PORT = 5000
 MESSAGE = "Hello from the server!"
 
 # 0.0.0.0 listens on all network interfaces, so other devices can connect.

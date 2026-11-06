@@ -5,7 +5,7 @@ Usage: python src/run_client.py [server-ip] [message]
 
 import sys
 
-from client.tcp_client import send_request
+from client.tcp_client import ClientBindIpError, send_request
 from shared.address import format_address
 from shared.json_serialization import to_json
 from shared.settings import (
@@ -18,7 +18,7 @@ from tls.settings import TLS_CERTIFICATE_FILE
 
 
 def get_server_host() -> str:
-    """Returns the IP given on the command line, or the default if there is none."""
+    """Returns the IP given on the command line, or the one from the settings if there is none."""
     return sys.argv[1] if len(sys.argv) > 1 else CLIENT_DEFAULT_SERVER_HOST
 
 
@@ -40,6 +40,8 @@ def main():
     message = get_message()
     try:
         response = send_request(server_host, message, tls_context)
+    except ClientBindIpError as error:
+        sys.exit(str(error))
     except ValueError as error:
         sys.exit(f"Could not complete the request: {error}")
     except OSError as error:

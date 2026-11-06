@@ -11,6 +11,7 @@ import time
 
 from server.message_handler import handle_client_message, handle_response_sent
 from server.tcp_server import TcpServer
+from shared.address import format_address
 from shared.settings import (
     SERVER_KEEP_ALIVE_INTERVAL_SECONDS,
     SERVER_LISTEN_HOST,
@@ -56,7 +57,14 @@ def main():
         handle_client_message,
         handle_response_sent,
     )
-    server.start()
+    try:
+        server.start()
+    except OSError as error:
+        sys.exit(
+            f"Could not listen on {format_address(SERVER_LISTEN_HOST, SERVER_PORT)}: {error}\n"
+            "Check that the port is free and SERVER_LISTEN_HOST in .env is an IP on this device. "
+            "Run ipconfig to see this device's IP addresses."
+        )
 
     # Keep the main thread alive and free while the background threads do the work.
     try:

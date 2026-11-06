@@ -2,6 +2,7 @@
 
 import os
 from pathlib import Path
+from typing import overload
 
 from dotenv import dotenv_values, set_key
 
@@ -13,6 +14,9 @@ ENV_DB_NAME = "DB_NAME"
 ENV_DB_USER = "DB_USER"
 ENV_DB_PASSWORD_ENCRYPTED = "DB_PASSWORD_ENCRYPTED"
 ENV_DB_ENCRYPTION_KEY = "DB_ENCRYPTION_KEY"
+ENV_SERVER_LISTEN_HOST = "SERVER_LISTEN_HOST"
+ENV_CLIENT_BIND_IP = "CLIENT_BIND_IP"
+ENV_CLIENT_DEFAULT_SERVER_HOST = "CLIENT_DEFAULT_SERVER_HOST"
 
 
 class EnvironmentValueError(Exception):
@@ -30,6 +34,12 @@ class EnvironmentManager:
     @property
     def env_file(self) -> Path:
         return self._env_file
+
+    @overload
+    def get(self, name: str, default: str) -> str: ...
+
+    @overload
+    def get(self, name: str, default: None = None) -> str | None: ...
 
     def get(self, name: str, default: str | None = None) -> str | None:
         """Returns the value, or the default if it's missing or empty."""

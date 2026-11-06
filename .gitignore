@@ -4,6 +4,10 @@
 # TLS certificate and private key: never commit these
 certs/
 
+# Created while running: records the last report sent from this device
+last_report_sent.json
+last_report_sent.json.tmp
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]

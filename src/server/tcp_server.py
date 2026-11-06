@@ -1,15 +1,26 @@
-"""The TCP server: accepts many clients at once and prints the messages they send."""
+"""The TCP server: accepts many clients at once and answers their messages with JSON."""
 
 import socket
 import ssl
 import threading
+from collections.abc import Callable
 
 from server.client_registry import ClientRegistry
 from server.connected_client import ConnectedClient
 from shared.address import format_address
-from shared.message_framing import MessageDecoder
-from shared.settings import SERVER_RECEIVE_BUFFER_BYTES, SERVER_SOCKET_TIMEOUT_SECONDS
+from shared.json_serialization import to_json
+from shared.message_framing import MessageDecoder, encode_message
+from shared.settings import (
+    SERVER_RECEIVE_BUFFER_BYTES,
+    SERVER_SEND_TIMEOUT_SECONDS,
+    SERVER_SOCKET_TIMEOUT_SECONDS,
+)
 from tls.settings import TLS_HANDSHAKE_TIMEOUT_SECONDS
+
+FAILED_REQUEST_RESPONSE = {
+    "status": "error",
+    "message": "The server could not process this request",
+}
 
 
 class TcpServer:
@@ -57,6 +68,8 @@ class TcpServer:
         host: str,
         port: int,
         tls_context: ssl.SSLContext,
+        message_handler: Callable[[str], dict],
+        response_sent_handler: Callable[[str, dict], None] | None = None,
         timeout_seconds: float = SERVER_SOCKET_TIMEOUT_SECONDS,
         verbose: bool = True,
     ):
@@ -64,6 +77,8 @@ class TcpServer:
         self.port = port
 
         self._tls_context = tls_context
+        self._message_handler = message_handler
+        self._response_sent_handler = response_sent_handler
         self._timeout_seconds = timeout_seconds
         self._verbose = verbose
         self._clients = ClientRegistry()
@@ -148,7 +163,7 @@ class TcpServer:
         return True
 
     def _receive_messages(self, client: ConnectedClient):
-        """Prints each message from the client, until it disconnects or the server stops."""
+        """Prints and answers each message, until the client disconnects or the server stops."""
         message_decoder = MessageDecoder()
         receive_data = lambda: client.client_socket.recv(SERVER_RECEIVE_BUFFER_BYTES)
         try:
@@ -158,6 +173,7 @@ class TcpServer:
                     # !r shows line breaks and control characters as text, so a client
                     # can't make its message look like one of the server's own status lines.
                     self._log(f"Message received from {client.address}: {message!r}")
+                    self._send_response(client, message)
         except ValueError as error:
             self._log(f"Invalid message from {client.address}: {error}")
             return
@@ -166,6 +182,39 @@ class TcpServer:
 
         if message_decoder.has_incomplete_message:
             self._log(f"Connection from {client.address} ended in the middle of a message")
+
+    # endregion
+
+    # region RESPONDING TO CLIENTS
+    def _send_response(self, client: ConnectedClient, message: str):
+        """Sends the JSON response. Runs in the client's thread, the only one using its socket."""
+        try:
+            response = self._message_handler(message)
+            encoded_response = encode_message(to_json(response))
+        except Exception as error:
+            # The details stay in the server's log, because they may be sensitive.
+            self._log(f"Could not create a response for {client.address}: {error!r}")
+            self._send_encoded_response(client, encode_message(to_json(FAILED_REQUEST_RESPONSE)))
+            return
+
+        self._send_encoded_response(client, encoded_response)
+        self._notify_response_sent(client, message, response)
+
+    def _send_encoded_response(self, client: ConnectedClient, encoded_response: bytes):
+        # The short reading timeout is too strict for sending a whole response.
+        client.client_socket.settimeout(SERVER_SEND_TIMEOUT_SECONDS)
+        client.client_socket.sendall(encoded_response)
+        client.client_socket.settimeout(self._timeout_seconds)
+        self._log(f"Response sent to {client.address} ({len(encoded_response)} bytes)")
+
+    def _notify_response_sent(self, client: ConnectedClient, message: str, response: dict):
+        if self._response_sent_handler is None:
+            return
+        try:
+            self._response_sent_handler(message, response)
+        except Exception as error:
+            # The client already has its response, so this shouldn't disconnect it.
+            self._log(f"Could not finish after responding to {client.address}: {error!r}")
 
     # endregion
 

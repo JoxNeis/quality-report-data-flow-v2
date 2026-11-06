@@ -9,6 +9,7 @@ import ssl
 import sys
 import time
 
+from server.message_handler import handle_client_message, handle_response_sent
 from server.tcp_server import TcpServer
 from shared.settings import (
     SERVER_KEEP_ALIVE_INTERVAL_SECONDS,
@@ -48,7 +49,13 @@ def main():
             "Then copy the new server.crt to each client device."
         )
 
-    server = TcpServer(SERVER_LISTEN_HOST, SERVER_PORT, tls_context)
+    server = TcpServer(
+        SERVER_LISTEN_HOST,
+        SERVER_PORT,
+        tls_context,
+        handle_client_message,
+        handle_response_sent,
+    )
     server.start()
 
     # Keep the main thread alive and free while the background threads do the work.

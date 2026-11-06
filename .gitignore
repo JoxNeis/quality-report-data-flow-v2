@@ -1,3 +1,9 @@
+#
+.vscode/
+
+# TLS certificate and private key: never commit these
+certs/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]

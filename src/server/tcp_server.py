@@ -1,16 +1,19 @@
-"""The TCP server: accepts many clients at once and tracks them until they disconnect."""
+"""The TCP server: accepts many clients at once and prints the messages they send."""
 
 import socket
+import ssl
 import threading
 
 from server.client_registry import ClientRegistry
 from server.connected_client import ConnectedClient
 from shared.address import format_address
-from shared.settings import RECEIVE_BUFFER_BYTES, SERVER_SOCKET_TIMEOUT_SECONDS
+from shared.message_framing import MessageDecoder
+from shared.settings import SERVER_RECEIVE_BUFFER_BYTES, SERVER_SOCKET_TIMEOUT_SECONDS
+from tls.settings import TLS_HANDSHAKE_TIMEOUT_SECONDS
 
 
 class TcpServer:
-    """Listens for clients and watches each one, in the background, until it disconnects."""
+    """Listens for clients and receives each one's messages, in the background, until it disconnects."""
 
     # region PROPERTIES
     @property
@@ -34,10 +37,16 @@ class TcpServer:
         self._port = value
 
     @property
-    def connections(self) -> dict[str, socket.socket]:
-        """The connected clients, as {"host:port": socket}."""
+    def connections(self) -> dict[str, ssl.SSLSocket]:
+        """The clients that finished the TLS handshake, as {"host:port": socket}.
+
+        Don't send through these sockets from another thread. Each client's thread is always
+        reading from its socket, and a TLS socket can't safely be used by two threads at once.
+        """
         return {
-            client.address: client.client_socket for client in self._clients.get_all()
+            client.address: client.client_socket
+            for client in self._clients.get_all()
+            if client.is_secured
         }
 
     # endregion
@@ -47,12 +56,14 @@ class TcpServer:
         self,
         host: str,
         port: int,
+        tls_context: ssl.SSLContext,
         timeout_seconds: float = SERVER_SOCKET_TIMEOUT_SECONDS,
         verbose: bool = True,
     ):
         self.host = host
         self.port = port
 
+        self._tls_context = tls_context
         self._timeout_seconds = timeout_seconds
         self._verbose = verbose
         self._clients = ClientRegistry()
@@ -89,39 +100,72 @@ class TcpServer:
     def _accept_clients(self):
         """Runs in the accept thread, adding each new client until the server stops."""
         while accepted := self._retry_until_stopped(self._listening_socket.accept):
-            client_socket, (client_host, client_port) = accepted
-            self._add_client(client_socket, format_address(client_host, client_port))
+            plain_socket, (client_host, client_port) = accepted
+            self._add_client(plain_socket, format_address(client_host, client_port))
 
-    def _add_client(self, client_socket: socket.socket, address: str):
-        client_socket.settimeout(self._timeout_seconds)
-        watcher_thread = self._create_background_thread(
-            self._watch_client, client_socket, address
-        )
+    def _add_client(self, plain_socket: socket.socket, address: str):
+        try:
+            # This only prepares TLS. The handshake runs in the client's own thread,
+            # so a slow or invalid client can't stop other clients from connecting.
+            tls_socket = self._tls_context.wrap_socket(
+                plain_socket, server_side=True, do_handshake_on_connect=False
+            )
+        except OSError as error:
+            plain_socket.close()
+            self._log(f"Could not set up TLS for {address}: {error}")
+            return
+
+        client = ConnectedClient(address, tls_socket)
+        client.watcher_thread = self._create_background_thread(self._watch_client, client)
         # Add the client first, so its thread can never try to remove it too early.
-        self._clients.add(ConnectedClient(address, client_socket, watcher_thread))
-        self._log(f"Client connected from {address}")
-        watcher_thread.start()
+        self._clients.add(client)
+        client.watcher_thread.start()
 
     # endregion
 
     # region WATCHING CLIENTS
-    def _watch_client(self, client_socket: socket.socket, address: str):
+    def _watch_client(self, client: ConnectedClient):
         """Runs in one thread per client. The thread ends when this function returns."""
-        with client_socket:
-            self._wait_until_disconnected(client_socket)
+        with client.client_socket:
+            if self._complete_tls_handshake(client):
+                self._log(f"Client connected from {client.address} using {client.client_socket.version()}")
+                self._receive_messages(client)
+                self._log(f"Client disconnected from {client.address}")
 
-        self._clients.remove(address)
-        self._log(f"Client disconnected from {address}")
+        self._clients.remove(client.address)
 
-    def _wait_until_disconnected(self, client_socket: socket.socket):
-        """Returns once the connection closes or the server stops. Discards received data."""
-        receive_data = lambda: client_socket.recv(RECEIVE_BUFFER_BYTES)
+    def _complete_tls_handshake(self, client: ConnectedClient) -> bool:
+        """Returns whether the client completed the TLS handshake in time."""
+        try:
+            client.client_socket.settimeout(TLS_HANDSHAKE_TIMEOUT_SECONDS)
+            client.client_socket.do_handshake()
+            client.client_socket.settimeout(self._timeout_seconds)
+        except OSError as error:
+            self._log(f"TLS handshake failed for {client.address}: {error}")
+            return False
+
+        client.is_secured = True
+        return True
+
+    def _receive_messages(self, client: ConnectedClient):
+        """Prints each message from the client, until it disconnects or the server stops."""
+        message_decoder = MessageDecoder()
+        receive_data = lambda: client.client_socket.recv(SERVER_RECEIVE_BUFFER_BYTES)
         try:
             # Empty data means the client closed the connection; None means the server stopped.
-            while self._retry_until_stopped(receive_data):
-                pass
+            while data := self._retry_until_stopped(receive_data):
+                for message in message_decoder.decode(data):
+                    # !r shows line breaks and control characters as text, so a client
+                    # can't make its message look like one of the server's own status lines.
+                    self._log(f"Message received from {client.address}: {message!r}")
+        except ValueError as error:
+            self._log(f"Invalid message from {client.address}: {error}")
+            return
         except OSError:
             pass  # The connection was lost or closed.
+
+        if message_decoder.has_incomplete_message:
+            self._log(f"Connection from {client.address} ended in the middle of a message")
 
     # endregion
 
